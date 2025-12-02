@@ -1,0 +1,7 @@
+C:/Users/plaza/VSCode/rnnoise/build/rnnoise.dir/Release/celt_lpc.obj
+C:/Users/plaza/VSCode/rnnoise/build/rnnoise.dir/Release/denoise.obj
+C:/Users/plaza/VSCode/rnnoise/build/rnnoise.dir/Release/kiss_fft.obj
+C:/Users/plaza/VSCode/rnnoise/build/rnnoise.dir/Release/pitch.obj
+C:/Users/plaza/VSCode/rnnoise/build/rnnoise.dir/Release/rnn.obj
+C:/Users/plaza/VSCode/rnnoise/build/rnnoise.dir/Release/rnn_data.obj
+C:/Users/plaza/VSCode/rnnoise/build/rnnoise.dir/Release/rnn_reader.obj

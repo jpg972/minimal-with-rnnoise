@@ -1,0 +1,15 @@
+﻿  celt_lpc.c
+C:\Users\plaza\VSCode\rnnoise\src\celt_lpc.c(291,1): fatal error C1010: final de archivo inesperado al buscar la directiva de encabezado precompilado. Compruebe si olvidó agregar '#include "pch.h"' al código fuente?
+  denoise.c
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(654,1): fatal error C1010: final de archivo inesperado al buscar la directiva de encabezado precompilado. Compruebe si olvidó agregar '#include "pch.h"' al código fuente?
+  kiss_fft.c
+C:\Users\plaza\VSCode\rnnoise\src\kiss_fft.c(602,1): fatal error C1010: final de archivo inesperado al buscar la directiva de encabezado precompilado. Compruebe si olvidó agregar '#include "pch.h"' al código fuente?
+  pitch.c
+C:\Users\plaza\VSCode\rnnoise\src\pitch.c(542,1): fatal error C1010: final de archivo inesperado al buscar la directiva de encabezado precompilado. Compruebe si olvidó agregar '#include "pch.h"' al código fuente?
+  rnn.c
+C:\Users\plaza\VSCode\rnnoise\src\rnn.c(187,1): fatal error C1010: final de archivo inesperado al buscar la directiva de encabezado precompilado. Compruebe si olvidó agregar '#include "pch.h"' al código fuente?
+  rnn_data.c
+C:\Users\plaza\VSCode\rnnoise\src\rnn_data.c(11052,1): fatal error C1010: final de archivo inesperado al buscar la directiva de encabezado precompilado. Compruebe si olvidó agregar '#include "pch.h"' al código fuente?
+  rnn_reader.c
+C:\Users\plaza\VSCode\rnnoise\src\rnn_reader.c(169,1): fatal error C1010: final de archivo inesperado al buscar la directiva de encabezado precompilado. Compruebe si olvidó agregar '#include "pch.h"' al código fuente?
+  Generando código...

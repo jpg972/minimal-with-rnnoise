@@ -1,0 +1,729 @@
+#!/usr/bin/env python
+# PYTHON_ARGCOMPLETE_OK
+
+'''InterCom con reducción de ruido RNNoise para transmisión bidireccional (full-duplex) de audio.
+   RNNoise aplica la reducción de ruido al audio saliente (grabado por mic/leído de archivo).
+'''
+
+import os
+import signal
+import argparse
+import sounddevice as sd
+import numpy as np
+import socket
+import time
+import psutil
+import logging
+import soundfile as sf
+import threading
+import sys # Para la salida de errores al iniciar Pygame
+
+# ====================================================================
+# --- LIBRERÍAS GRÁFICAS (Opcionales) ---
+# ====================================================================
+try:
+    import pygame 
+    import pygame_widgets
+    # Constante para indicar si las librerías gráficas cargaron
+    PYGAME_LOADED = True
+except ImportError:
+    logging.warning("Pygame/pygame_widgets no están instalados. La funcionalidad --show_spectrum no funcionará.")
+    PYGAME_LOADED = False
+    # Crea objetos dummy para evitar NameError
+    class DummyPygame:
+        def init(self): pass
+        def display(self): pass
+        def set_mode(self, size): return self
+        def set_at(self, pos, color): pass
+        def blit(self, surface, pos): pass
+        def update(self): pass
+        def event(self): pass
+        def get(self): return []
+        def QUIT(self): return 0
+        def surfarray(self): pass
+    pygame = DummyPygame()
+    pygame_widgets = type('obj', (object,), {'update' : lambda *args: None})()
+
+
+# ====================================================================
+# --- 1. CONFIGURACIÓN E INTEGRACIÓN DE RNNOISE ---
+# ====================================================================
+
+import ctypes
+
+# Ruta absoluta del directorio donde está minimal_rnnoise.py
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Construimos ruta relativa a la DLL
+RNNOISE_DLL_PATH = os.path.normpath(
+    os.path.join(BASE_DIR, "..", "..", "rnnoise", "build", "Release", "rnnoise.dll")
+)
+# Cargar la DLL compilada (usamos cdll porque CMake fuerza los símbolos C)
+try:
+    rnnoise = ctypes.cdll.LoadLibrary(RNNOISE_DLL_PATH)
+except FileNotFoundError:
+    print(f"ERROR: No se encontró la DLL de RNNoise en la ruta: {RNNOISE_DLL_PATH}", file=sys.stderr)
+    print("Por favor, asegúrate de haber compilado la DLL con CMake y de que la ruta sea correcta.", file=sys.stderr)
+    exit(1)
+
+# Definición del tipo de puntero RNNState (opaco)
+class RNNState(ctypes.Structure):
+    pass
+
+# Definición de prototipos de funciones
+rnnoise.rnnoise_create.restype = ctypes.POINTER(RNNState)
+rnnoise.rnnoise_destroy.argtypes = [ctypes.POINTER(RNNState)]
+rnnoise.rnnoise_process_frame.argtypes = [
+    ctypes.POINTER(RNNState),
+    ctypes.POINTER(ctypes.c_float),  # out_buf (salida: audio limpio)
+    ctypes.POINTER(ctypes.c_float)   # in_buf (entrada: audio sucio)
+]
+rnnoise.rnnoise_process_frame.restype = ctypes.c_float
+
+# Clase envoltorio (Wrapper) de RNNoise
+class RNNoise:
+    FRAME_SIZE = 480
+
+    def __init__(self):
+        self.state = rnnoise.rnnoise_create()
+        if not self.state:
+            raise RuntimeError("Error creando el estado RNNoise (DLL no inicializada)")
+
+    def process_frame(self, frame: np.ndarray):
+        if frame.dtype != np.float32 or len(frame) != self.FRAME_SIZE:
+            raise ValueError(f"El frame debe ser np.float32 con {self.FRAME_SIZE} muestras.")
+
+        in_buf = frame.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        out_array = np.zeros(self.FRAME_SIZE, dtype=np.float32)
+        out_buf = out_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        
+        vad_prob = rnnoise.rnnoise_process_frame(self.state, out_buf, in_buf)
+        
+        return out_array, vad_prob
+
+    def destroy(self):
+        if self.state:
+            rnnoise.rnnoise_destroy(self.state)
+            self.state = None
+    
+    def __del__(self):
+        self.destroy()
+
+# ====================================================================
+# --- 2. CONFIGURACIÓN DEL LOGGING Y PARSER ---
+# ====================================================================
+
+FORMAT = "(%(levelname)s) %(module)s: %(message)s"
+logging.basicConfig(format=FORMAT, level=logging.INFO)
+
+def spinning_cursor():
+    while True:
+        for cursor in '|/-\\':
+            yield cursor
+spinner = spinning_cursor()
+
+def int_or_str(text):
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument("-i", "--input-device", type=int_or_str, help="Input device ID or substring")
+parser.add_argument("-o", "--output-device", type=int_or_str, help="Output device ID or substring")
+parser.add_argument("-d", "--list-devices", action="store_true", help="Print the available audio devices and quit")
+# Parámetros ajustados a RNNoise por defecto
+parser.add_argument("-s", "--frames_per_second", type=float, default=48000, help="sampling rate in frames/second") 
+parser.add_argument("-c", "--frames_per_chunk", type=int, default=960, help="Number of frames in a chunk (múltiplo de 480 si se usa --rnnoise)") 
+parser.add_argument("-l", "--listening_port", type=int, default=4444, help="My listening port")
+parser.add_argument("-a", "--destination_address", type=int_or_str, default="localhost", help="Destination (interlocutor's listening) address")
+parser.add_argument("-p", "--destination_port", type=int, default=4444, help="Destination (interlocutor's listing-) port")
+parser.add_argument("-f", "--filename", type=str, help="Use a wav/oga/... file instead of the mic data")
+parser.add_argument("-t", "--reading_time", type=int, help="Time reading data (mic or file) (only with effect if --show_stats or --show_data is used)")
+parser.add_argument("-n", "--number_of_channels", type=int, default=1, help="Number of channels")
+
+# Argumentos de funcionalidad
+parser.add_argument("--rnnoise", action="store_false", default=True, help="Disable RNNoise reduction on outgoing audio (it is True by default)") 
+parser.add_argument("--show_stats", action="store_true", help="Shows bandwith, CPU and quality statistics")
+parser.add_argument("--show_samples", action="store_true", help="Shows samples values")
+parser.add_argument("--show_spectrum", action="store_true", help="Shows Fourier spectrum")
+
+
+# ====================================================================
+# --- 3. CLASES BASE (MINIMAL) ---
+# ====================================================================
+
+class Minimal:
+    MAX_PAYLOAD_BYTES = 32768
+
+    def __init__(self):
+        logging.info(__doc__)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.listening_endpoint = ("0.0.0.0", args.listening_port)
+        self.sock.bind(self.listening_endpoint)
+        self.chunk_time = args.frames_per_chunk / args.frames_per_second
+        logging.info(f"chunk_time = {self.chunk_time} seconds")
+        self.zero_chunk = self.generate_zero_chunk()
+
+        if args.filename:
+            logging.info(f"Using \"{args.filename}\" as input")
+            self.wavfile = sf.SoundFile(args.filename, 'r')
+            self._handler = self._read_IO_and_play
+            self.stream = self.file_stream
+        else:
+            self._handler = self._record_IO_and_play
+            self.stream = self.mic_stream
+
+        self.end = False
+
+    def pack(self, chunk):
+        return chunk
+
+    def unpack(self, packed_chunk):
+        chunk = np.frombuffer(packed_chunk, np.int16)
+        chunk = chunk.reshape(args.frames_per_chunk, args.number_of_channels)
+        return chunk
+
+    def send(self, packed_chunk):
+        try:
+            self.sock.sendto(packed_chunk, (args.destination_address, args.destination_port))
+        except BlockingIOError:
+            pass
+
+    def receive(self):
+        try:
+            packed_chunk, sender = self.sock.recvfrom(self.MAX_PAYLOAD_BYTES)
+            return packed_chunk
+        except socket.timeout:
+            raise
+
+    def generate_zero_chunk(self):
+        return np.zeros((args.frames_per_chunk, args.number_of_channels), np.int16)
+
+    def _record_IO_and_play(self, ADC, DAC, frames, time, status):
+        packed_chunk = self.pack(ADC.copy() if __debug__ else ADC)
+        self.send(packed_chunk)
+        try:
+            packed_chunk = self.receive()
+            chunk = self.unpack(packed_chunk)
+        except (socket.timeout, BlockingIOError):
+            chunk = self.zero_chunk
+            logging.debug("playing zero chunk")
+        DAC[:] = chunk
+        if __debug__:
+            print(next(spinner), end='\b', flush=True)
+
+    def read_chunk_from_file(self):
+        chunk = self.wavfile.buffer_read(args.frames_per_chunk, dtype='int16')
+        if len(chunk) < args.frames_per_chunk * args.number_of_channels * 2: # 2 bytes/sample
+            logging.warning("Input exhausted! :-/")
+            os.kill(os.getpid(), signal.SIGINT)
+            return self.zero_chunk
+        chunk = np.frombuffer(chunk, dtype=np.int16)
+        try:
+            chunk = np.reshape(chunk, (args.frames_per_chunk, args.number_of_channels))
+        except ValueError:
+            logging.warning("File reading incomplete or truncated chunk.")
+            return self.zero_chunk
+        return chunk
+            
+    def _read_IO_and_play(self, DAC, frames, time, status):
+        chunk = self.read_chunk_from_file()
+        packed_chunk = self.pack(chunk)
+        self.send(packed_chunk)
+        try:
+            packed_chunk = self.receive()
+            chunk = self.unpack(packed_chunk)
+        except (socket.timeout, BlockingIOError, ValueError):
+            chunk = self.zero_chunk
+            logging.debug("playing zero chunk")
+        DAC[:] = chunk
+        if __debug__:
+            print(next(spinner), end='\b', flush=True)
+        return chunk
+
+    def mic_stream(self, callback_function):
+        return sd.Stream(device=(args.input_device, args.output_device),
+                         dtype=np.int16,
+                         samplerate=args.frames_per_second,
+                         blocksize=args.frames_per_chunk,
+                         channels=args.number_of_channels,
+                         callback=callback_function)
+
+    def file_stream(self, callback_function):
+        return sd.OutputStream(
+            dtype=np.int16,
+            samplerate=args.frames_per_second,
+            blocksize=args.frames_per_chunk,
+            device=args.output_device,
+            channels=args.number_of_channels,
+            callback=callback_function)
+
+    def run(self):
+        self.sock.settimeout(0)
+        logging.info("Press enter-key to quit")
+
+        with self.stream(self._handler):
+            input()
+
+    def print_final_averages(self):
+        pass
+
+# ====================================================================
+# --- 4. CLASE VERBOSE (MINIMAL__VERBOSE) ---
+# ====================================================================
+
+class Minimal__verbose(Minimal):
+    ''' Verbose version of Minimal, implementing statistics and display. '''
+
+    seconds_per_cycle = 1
+    
+    def __init__(self):
+        super().__init__()
+
+        self.cycle = 1
+        self.sent_bytes_count = 0
+        self.received_bytes_count = 0
+        self.sent_messages_count = 0
+        self.received_messages_count = 0
+        self.sent_KBPS = 0
+        self.received_KBPS = 0
+
+        self.average_sent_messages = 0
+        self.average_received_messages = 0
+        self.average_CPU_usage = 0
+        self.average_global_CPU_usage = 0
+        self.average_sent_KBPS = 0
+        self.average_received_KBPS = 0
+        
+        self.frames_per_cycle = self.seconds_per_cycle * args.frames_per_second
+        self.chunks_per_cycle = self.frames_per_cycle / args.frames_per_chunk
+
+        self.old_time = time.time()
+        self.old_CPU_time = psutil.Process().cpu_times()[0]
+
+        self.total_number_of_sent_chunks = 0
+        self.chunks_to_send = 999999
+        if args.reading_time:
+            self.chunks_to_send = int(args.reading_time)/self.chunk_time
+
+        logging.info(f"seconds_per_cycle = {self.seconds_per_cycle}")             
+        logging.info(f"chunks_per_cycle = {self.chunks_per_cycle}")
+        logging.info(f"frames_per_cycle = {self.frames_per_cycle}")
+        
+        if args.show_spectrum and PYGAME_LOADED:
+            self.recorded_chunk = self.generate_zero_chunk()
+            self.played_chunk = self.generate_zero_chunk()
+            self.eye_size = args.frames_per_chunk//2
+            self.window_heigh = self.eye_size + 1
+            pygame.init()
+            self.display = pygame.display.set_mode((args.frames_per_chunk//2, self.window_heigh))
+            self.display.fill((0, 0, 0))
+            self.surface = pygame.surface.Surface((args.frames_per_chunk//2, self.window_heigh)).convert()
+            self.RGB_matrix = np.zeros((self.window_heigh, args.frames_per_chunk//2, 3), dtype=np.uint8)
+            self.eye = 255*np.eye(self.eye_size, dtype=int)
+            self.hamming_window = np.hamming(args.frames_per_chunk)
+            
+    def update_display(self):
+        if not PYGAME_LOADED: return
+        events = pygame.event.get()
+        for event in events:
+             if event.type == pygame.QUIT:
+                 self.end = True
+                 return
+
+        le_channel_rec = self.recorded_chunk[:, 0]
+        ri_channel_rec = self.recorded_chunk[:, 1]
+        le_channel_pla = self.played_chunk[:, 0]
+        ri_channel_pla = self.played_chunk[:, 1]
+        
+        le_windowed_channel_rec = le_channel_rec * self.hamming_window
+        ri_windowed_channel_rec = ri_channel_rec * self.hamming_window
+        le_windowed_channel_pla = le_channel_pla * self.hamming_window
+        ri_windowed_channel_pla = ri_channel_pla * self.hamming_window
+        
+        le_FFT_rec = np.fft.rfft(le_windowed_channel_rec)
+        ri_FFT_rec = np.fft.rfft(ri_windowed_channel_rec)
+        le_FFT_pla = np.fft.rfft(le_windowed_channel_pla)
+        ri_FFT_pla = np.fft.rfft(ri_windowed_channel_pla)
+        
+        le_spectrum_rec = np.sqrt(le_FFT_rec.real**2 + le_FFT_rec.imag**2) / args.frames_per_chunk + 1
+        ri_spectrum_rec = np.sqrt(ri_FFT_rec.real**2 + ri_FFT_rec.imag**2) / args.frames_per_chunk + 1
+        le_spectrum_pla = np.sqrt(le_FFT_pla.real**2 + le_FFT_pla.imag**2) / args.frames_per_chunk + 1
+        ri_spectrum_pla = np.sqrt(ri_FFT_pla.real**2 + ri_FFT_pla.imag**2) / args.frames_per_chunk + 1
+        
+        le_spectrum_rec = le_spectrum_rec.astype(np.uint16)
+        ri_spectrum_rec = ri_spectrum_rec.astype(np.uint16)
+        le_spectrum_pla = le_spectrum_pla.astype(np.uint16)
+        ri_spectrum_pla = ri_spectrum_pla.astype(np.uint16)
+        
+        le_spectrum_rec = np.clip(self.eye_size - le_spectrum_rec, 0, self.eye_size-1)
+        ri_spectrum_rec = np.clip(self.eye_size - ri_spectrum_rec, 0, self.eye_size-1)
+        le_spectrum_pla = np.clip(le_spectrum_pla, 0, self.eye_size-1)
+        ri_spectrum_pla = np.clip(ri_spectrum_pla, 0, self.eye_size-1)
+        
+        R_matrix = self.eye[le_spectrum_rec]
+        G_matrix = self.eye[ri_spectrum_rec]
+        R_matrix += self.eye[le_spectrum_pla]
+        G_matrix += self.eye[ri_spectrum_pla]
+        
+        self.RGB_matrix[:, :, 0] = R_matrix
+        self.RGB_matrix[:, :, 1] = G_matrix
+        
+        surface = pygame.surfarray.make_surface(self.RGB_matrix)
+        self.display.blit(surface, (0, 0))
+        pygame_widgets.update(events)
+        pygame.display.update()
+
+
+    def send(self, packed_chunk):
+        super().send(packed_chunk)
+        self.sent_bytes_count += packed_chunk.nbytes
+        self.sent_messages_count += 1
+
+    def receive(self):
+        try:
+            packed_chunk = super().receive()
+            self.received_bytes_count += len(packed_chunk)
+            self.received_messages_count += 1
+            return packed_chunk
+        except Exception:
+            raise
+
+    def stats(self):
+        string = ""
+        string += "{:5d}".format(self.cycle)
+        string += "{:8d}".format(self.sent_messages_count)
+        string += "{:8d}".format(self.received_messages_count)
+        string += "{:8d}".format(self.sent_KBPS)
+        string += "{:8d}".format(self.received_KBPS)
+        string += "{:5d}".format(int(self.CPU_usage))
+        string += "{:5d}".format(int(self.global_CPU_usage))
+        return string
+
+    def print_stats(self):
+        print(self.stats())
+
+    def first_line(self):
+        string = ""
+        string += "{:5s}".format('')
+        string += "{:>8s}".format("sent")
+        string += "{:>8s}".format("recv.")
+        string += "{:>8s}".format("sent")
+        string += "{:>9s}".format("recv.")
+        string += "{:3s}".format('')
+        string += "{:>6s}".format("Global")
+        return string
+
+    def print_first_line(self):
+        print(self.first_line())
+
+    def second_line(self):
+        string = ""
+        string += "{:5s}".format("cycle")
+        string += "{:>8s}".format("mesgs.")
+        string += "{:>8s}".format("mesgs.")
+        string += "{:>8s}".format("KBPS")
+        string += "{:>8s}".format("KBPS")
+        string += "{:>5s}".format("%CPU")
+        string += "{:>5s}".format("%CPU")
+        return string
+
+    def print_second_line(self):
+        print(self.second_line())
+
+    def averages(self):
+        string = ""
+        string += "{:5s}".format("Avgs:")
+        string += "{:8d}".format(int(self.average_sent_messages))
+        string += "{:8d}".format(int(self.average_received_messages))
+        string += "{:>8d}".format(int(self.average_sent_KBPS))
+        string += "{:>8d}".format(int(self.average_received_KBPS))
+        string += "{:>5d}".format(int(self.average_CPU_usage))
+        string += "{:>5d}".format(int(self.average_global_CPU_usage))
+        return string
+
+    def print_averages(self):
+        print("\033[7m" + self.averages() + "\033[m")
+        
+    def separator(self):
+        string = f"{'='*(5*3+8*4)}"
+        return string
+
+    def print_separator(self):
+        print(self.separator())
+
+    def print_header(self):
+        self.print_first_line()
+        self.print_second_line()
+        self.print_separator()
+
+    def print_trailer(self):
+        self.print_second_line()
+        self.print_first_line()
+        
+    def moving_average(self, average, new_sample, number_of_samples):
+        return average + (new_sample - average) / number_of_samples
+
+    def cycle_feedback(self):
+        ''' Computes and shows the statistics. '''
+
+        elapsed_time = time.time() - self.old_time
+        elapsed_CPU_time = psutil.Process().cpu_times()[0] - self.old_CPU_time
+        self.CPU_usage = 100 * elapsed_CPU_time / elapsed_time
+        self.global_CPU_usage = psutil.cpu_percent()
+        self.average_CPU_usage = self.moving_average(self.average_CPU_usage, self.CPU_usage, self.cycle)
+        self.average_global_CPU_usage = self.moving_average(self.average_global_CPU_usage, self.global_CPU_usage, self.cycle)
+        self.old_time = time.time()
+        self.old_CPU_time = psutil.Process().cpu_times()[0]
+
+        self.average_sent_messages = self.moving_average(self.average_sent_messages, self.sent_messages_count, self.cycle)
+        self.average_received_messages = self.moving_average(self.average_received_messages, self.received_messages_count, self.cycle)
+
+        self.sent_KBPS = int(self.sent_bytes_count * 8 / 1000 / elapsed_time)
+        self.received_KBPS = int(self.received_bytes_count * 8 / 1000 / elapsed_time)
+        self.average_sent_KBPS = self.moving_average(self.average_sent_KBPS, self.sent_KBPS, self.cycle)
+        self.average_received_KBPS = self.moving_average(self.average_received_KBPS, self.received_KBPS, self.cycle)
+
+        self.print_stats()
+        self.print_averages()
+        self.print_separator()      
+        self.print_trailer()
+        print("\033[5A")
+
+        self.total_number_of_sent_chunks += self.sent_messages_count
+        self.sent_bytes_count = 0
+        self.received_bytes_count = 0
+        self.sent_messages_count = 0
+        self.received_messages_count = 0
+
+        self.cycle += 1
+
+    def print_final_averages(self):
+        print('\n'*4)
+        print(f"CPU usage average = {self.average_CPU_usage:.2f} %")
+        print(f"Payload sent average = {self.average_sent_KBPS:.2f} kilo bits per second")
+        print(f"Payload received average = {self.average_received_KBPS:.2f} kilo bits per second")
+
+    def print_running_info(self):
+        print("\nInterCom parameters:\n")
+        print(args)
+        print("\nUsing device:\n")
+        print(sd.query_devices(args.input_device))
+        print()
+        print("Use CTRL+C to quit")
+
+    def show_data(self, data):
+        for i in range(4):
+            print(data[i], end=' ')
+        print("...", end=' ')
+        for i in range(args.frames_per_chunk//2 - 2, args.frames_per_chunk//2 + 2):
+            print(data[i], end=' ')
+        print("...", end=' ')
+        for i in range(args.frames_per_chunk-4, args.frames_per_chunk):
+            print(data[i], end=' ')
+
+    def show_recorded_chunk(self, recorded_chunk):
+        print("I =", end=' ')
+        self.show_data(recorded_chunk)
+        print()
+
+    def show_played_chunk(self, played_chunk):
+        print("\033[7mO =", end=' ')
+        self.show_data(played_chunk)
+        print("\033[m")
+
+    def _record_IO_and_play(self, ADC, DAC, frames, time, status):
+        
+        if args.show_samples:
+            self.show_recorded_chunk(ADC)
+
+        packed_chunk = self.pack(ADC.copy() if __debug__ else ADC)
+        self.send(packed_chunk)
+        
+        try:
+            packed_chunk = self.receive()
+            chunk = self.unpack(packed_chunk)
+        except (socket.timeout, BlockingIOError):
+            chunk = self.zero_chunk
+            logging.debug("playing zero chunk")
+        
+        DAC[:] = chunk
+
+        if args.show_samples:
+            self.show_played_chunk(DAC)
+
+        if args.show_spectrum:
+            self.recorded_chunk = ADC
+            self.played_chunk = DAC
+            
+        if __debug__:
+            print(next(spinner), end='\b', flush=True)
+
+    def _read_IO_and_play(self, DAC, frames, time, status):
+        
+        chunk = self.read_chunk_from_file()
+        
+        if args.show_samples:
+            self.show_recorded_chunk(chunk)
+
+        packed_chunk = self.pack(chunk)
+        self.send(packed_chunk)
+        
+        try:
+            packed_chunk = self.receive()
+            chunk_played = self.unpack(packed_chunk)
+        except (socket.timeout, BlockingIOError, ValueError):
+            chunk_played = self.zero_chunk
+            logging.debug("playing zero chunk")
+            
+        DAC[:] = chunk_played
+
+        if args.show_samples:
+            self.show_played_chunk(DAC)
+
+        if args.show_spectrum:
+            self.recorded_chunk = chunk # El que se leyó del archivo
+            self.played_chunk = DAC      # El que se recibió y se está reproduciendo
+
+        if __debug__:
+            print(next(spinner), end='\b', flush=True)
+            
+        return chunk_played
+
+    def loop_update_display(self):
+        while not self.end:
+            time.sleep(0.05)
+            self.update_display()
+
+    def loop_cycle_feedback(self):
+        while self.total_number_of_sent_chunks < self.chunks_to_send and not self.end:
+            time.sleep(self.seconds_per_cycle)
+            self.cycle_feedback()
+        self.end = True
+
+    def run(self):
+        cycle_feedback_thread = threading.Thread(target=self.loop_cycle_feedback)
+        cycle_feedback_thread.daemon = True
+        self.sock.settimeout(0)
+        self.print_running_info()
+        
+        if args.show_stats:
+             self.print_header()
+        
+        with self.stream(self._handler):
+            cycle_feedback_thread.start()
+            if args.show_spectrum:
+                if PYGAME_LOADED:
+                    self.loop_update_display()
+                else:
+                    logging.error("No se puede mostrar el espectro: Pygame no está cargado.")
+                    while not self.end:
+                        time.sleep(1)
+            else:
+                while not self.end:
+                    time.sleep(1)
+
+# ====================================================================
+# --- 5. CLASE RNNOISE (MINIMAL_RNNOISE) ---
+# ====================================================================
+
+class Minimal_RNNoise(Minimal):
+    '''
+    Minimal InterCom con reducción de ruido RNNoise en el audio saliente.
+    '''
+    
+    def __init__(self):
+        super().__init__()
+        logging.info("Initializing RNNoise denoiser...")
+        
+        # ➡️ Inicialización del estado RNNoise (llama a rnnoise_create)
+        self.rnnoise_denoiser = RNNoise()
+        
+        self.rnnoise_frame_size = self.rnnoise_denoiser.FRAME_SIZE
+        
+        if args.frames_per_chunk % self.rnnoise_frame_size != 0:
+            raise ValueError(
+                f"frames_per_chunk ({args.frames_per_chunk}) debe ser un múltiplo de RNNoise frame size ({self.rnnoise_frame_size})."
+            )
+        
+        self.num_sub_frames = args.frames_per_chunk // self.rnnoise_frame_size
+
+    def __del__(self):
+        # ➡️ Destrucción del estado RNNoise (llama a rnnoise_destroy)
+        if hasattr(self, 'rnnoise_denoiser'):
+            self.rnnoise_denoiser.destroy()
+
+    def pack(self, chunk: np.ndarray):
+        ''' Aplica RNNoise a cada sub-frame de audio antes de enviar. '''
+        
+        # 1. Normalizar de np.int16 a np.float32 (rango -1.0 a 1.0)
+        float_chunk = chunk.astype(np.float32) / 32767.0 
+        clean_float_chunk = np.zeros_like(float_chunk)
+
+        # 2. Dividir el chunk y procesar en sub-frames (480 muestras)
+        for i in range(self.num_sub_frames):
+            start = i * self.rnnoise_frame_size
+            end = (i + 1) * self.rnnoise_frame_size
+            
+            # Extraer sub-frame (RNNoise es mono, procesamos el primer canal)
+            mono_sub_frame = float_chunk[start:end, 0] if args.number_of_channels > 1 else float_chunk[start:end].flatten()
+            
+            # Aplicar RNNoise 
+            # El wrapper de RNNoise devuelve (clean_array, vad_prob)
+            clean_mono_sub_frame, vad = self.rnnoise_denoiser.process_frame(mono_sub_frame)
+            
+            # Insertar el audio limpio de vuelta
+            if args.number_of_channels > 1:
+                clean_float_chunk[start:end, 0] = clean_mono_sub_frame
+                clean_float_chunk[start:end, 1] = clean_mono_sub_frame # Duplicar el canal limpio
+            else:
+                clean_float_chunk[start:end] = clean_mono_sub_frame.reshape(-1, 1) # Asegurar la forma (480, 1)
+
+        # 3. Denormalizar de float32 a np.int16 para el envío
+        packed_chunk = (clean_float_chunk * 32767.0).astype(np.int16)
+
+        return packed_chunk
+
+# ====================================================================
+# --- 6. BLOQUE PRINCIPAL DE EJECUCIÓN ---
+# ====================================================================
+
+try:
+    import argcomplete
+except ImportError:
+    logging.warning("Unable to import argcomplete (optional)")
+
+if __name__ == "__main__":
+    parser.description = __doc__
+    try:
+        argcomplete.autocomplete(parser)
+    except Exception:
+        logging.warning("argcomplete not working :-/")
+    args = parser.parse_known_args()[0]
+
+    if args.list_devices:
+        print("Available devices:")
+        print(sd.query_devices())
+        quit()
+
+    # Lógica de instanciación con prioridad para RNNoise
+    if args.rnnoise:
+        # Forzar la frecuencia a 48kHz si no se especifica explícitamente y no es 48k
+        if args.frames_per_second != 48000.0:
+            logging.warning("⚠️ RNNoise funciona mejor a 48000 Hz. Ajustando 'frames_per_second' a 48000.")
+            args.frames_per_second = 48000.0
+        
+        intercom = Minimal_RNNoise()
+    elif args.show_stats or args.show_samples or args.show_spectrum:
+        intercom = Minimal__verbose()
+    else:
+        intercom = Minimal()
+
+    try:
+        intercom.run()
+    except KeyboardInterrupt:
+        parser.exit("\nSIGINT received")
+    finally:
+        intercom.print_final_averages()
+        

@@ -1,0 +1,33 @@
+﻿  celt_lpc.c
+  denoise.c
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(176,105): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(180,69): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(181,61): warning C4244: '*=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(196,29): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(342,66): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(345,44): warning C4305: '-=': truncamiento de 'double' a 'float'
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(346,46): warning C4305: '-=': truncamiento de 'double' a 'float'
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(347,61): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(351,30): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(352,54): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(354,38): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(396,71): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(415,58): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(416,49): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(433,89): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(434,42): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(436,37): warning C4244: '*=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(448,41): warning C4244: '=': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\denoise.c(469,1): warning C4305: 'inicializando': truncamiento de 'double' a 'const float'
+  kiss_fft.c
+  pitch.c
+C:\Users\plaza\VSCode\rnnoise\src\pitch.c(428,27): warning C4244: 'return': conversión de 'double' a 'opus_val16'; posible pérdida de datos
+  rnn.c
+C:\Users\plaza\VSCode\rnnoise\src\rnn.c(71,37): warning C4244: 'función': conversión de 'double' a 'float'; posible pérdida de datos
+C:\Users\plaza\VSCode\rnnoise\src\rnn.c(71,38): warning C4244: 'return': conversión de 'double' a 'float'; posible pérdida de datos
+  rnn_data.c
+  rnn_reader.c
+  rnnoise_demo.c
+C:\Users\plaza\VSCode\rnnoise\rnnoise_windows\rnnoise_demo.c(186,26): warning C4244: '=': conversión de 'float' a 'short'; posible pérdida de datos
+  Generando código...
+  Rnnoise-windows.vcxproj -> C:\Users\plaza\VSCode\rnnoise\x64\Debug\rnnoise-windows.exe

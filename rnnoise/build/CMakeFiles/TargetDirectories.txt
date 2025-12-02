@@ -1,0 +1,3 @@
+C:/Users/plaza/VSCode/rnnoise/build/CMakeFiles/rnnoise.dir
+C:/Users/plaza/VSCode/rnnoise/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/plaza/VSCode/rnnoise/build/CMakeFiles/ZERO_CHECK.dir
